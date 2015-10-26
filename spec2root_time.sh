@@ -12,8 +12,8 @@ spec2root ${ARGV[i]} << echo
 4                                    
 n
 t
-y
-1900 2100
+g
+1000 3000
 echo
 
     done

@@ -15,7 +15,7 @@ OBJECT  = spec2root.o
 
 
 $(EXE): $(OBJECT)
-	$(CC) -o $(EXE) $(LIBS) $(OBJECT)
+	$(CC) -o $(EXE)  $(OBJECT) $(LIBS)
 
 $(OBJECT): $(SOURCE)
 	$(CC) -c $(CFLAGS) -o $(OBJECT) $(INCLUDE) $(SOURCE) 
