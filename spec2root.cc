@@ -13,9 +13,13 @@
 	  **************************************/
 
 //Changelog:
+//30 Jan 2019 - results formatting, added Mean in GaussFit
+//23 Jul 2018 - ascii readout
+//27 Jun 2017 - conv fit
 //15 Dec 2016 - expo+pol0
 //05 Aug 2016 - binned likelyhood
 //13 Jul 2015 - expo fit
+
 
 
 #include <stdio.h>
@@ -47,19 +51,24 @@
 #include "TSpectrum.h"
 #include "TVirtualFitter.h"
 
+
 using namespace std;
 
 //#define DATATYPE float
+
 #define DATATYPE int
 
-  DATATYPE *data;
+  DATATYPE *bin_data;
+  float spec_data[100000];
 
   int nchan,
       graphical,
+      pdfoutput,
       time_spec,
       gauss_fit,
       expo_fit,
       conv_fit,
+      convgauss_fit,
       ngates,
       bkg_iterations,
       gateL[1000],
@@ -99,20 +108,24 @@ void timer() {
 void interactive() {
 	
 	  
-  printf("\n\nNumber of channels (1 - 16 k): ");
+  printf("\n\nNumber of channels (1 - 32 (k) for binary int; -1 for ascii): ");
   scanf("%d", &nchan);
-  if (nchan>=1 && nchan<=16) {
+  if (nchan>=1 && nchan<=32) {
     nchan=nchan*1024;
   }
+  else if (nchan == -1) {}
   else {
     printf(" ERROR - wrong number of channels: %d\n", nchan);
     exit(0);
   }
   
-  printf("Display spectrum in ROOT? (y/n): ");
+  printf("Display spectrum in ROOT (y/n) or PDF output (p): ");
   scanf("%s", &answer);
+  graphical=0;
+  pdfoutput=0;
   if      ( strncmp(answer, "y", 1) == 0 )  graphical = 1;
   else if ( strncmp(answer, "n", 1) == 0 ) graphical = 0;
+  else if ( strncmp(answer, "p", 1) == 0 ) pdfoutput = 1;
   else {
     printf(" ERROR - wrong answer\n\n");
     exit(0);
@@ -139,7 +152,7 @@ void interactive() {
 	    	scanf("%s", &answer);
 	    	if ( strncmp(answer, "h", 1) == 0 )  { 
 	    	bkg_iterations = 8;									//Tuning background fitting for HPGe
-	    	option_string = "same"; 
+	    	option_string = "kBackIncreasingWindow kBackOrder2 kFALSE kBackSmoothing3 kFALSE"; 
 	    	}
 	    	else if ( strncmp(answer, "l", 1) == 0 ) { 
 	    		bkg_iterations = 90;							//Tuning background fitting for LaBr
@@ -171,7 +184,7 @@ void interactive() {
   }
 
   else {
-	  printf("Fit gaussian, exponential, convolution or skip fitting? (g/e/c/s): ");
+	  printf("Fit gaussian, exponential, convolution, mixed(convolution+gauss) or skip fitting? (g/e/c/m/s): ");
       scanf("%s", &answer);
       if      ( strncmp(answer, "s", 1) != 0 ) {
 
@@ -184,6 +197,13 @@ void interactive() {
 			  printf("Fixed FWHM = (0 for free): ");
 			  scanf("%f", &conv_fwhm);
 		  }
+  		  else if  ( strncmp(answer, "m", 1) == 0 ) { 
+			  convgauss_fit  = 1;
+			  printf("Fixed centroid = (0 for free): ");
+			  scanf("%f", &conv_centroid);
+			  printf("Fixed FWHM = (0 for free): ");
+			  scanf("%f", &conv_fwhm);
+		  }		  
 			  
 			  
 			  
@@ -197,7 +217,7 @@ void interactive() {
           } 
       }		  
  
-      else if ( strncmp(answer, "s", 1) == 0 ) { gauss_fit = 0; expo_fit = 0; conv_fit = 0; }
+      else if ( strncmp(answer, "s", 1) == 0 ) { gauss_fit = 0; expo_fit = 0; conv_fit = 0; convgauss_fit = 0; }
       else {
         printf(" ERROR - wrong answer\n\n");
         exit(0);
@@ -211,11 +231,11 @@ void open_files(int argc, char **argv) {
 	
   	
   if( argc == 2) {
-	  file1 = fopen( argv[1], "rb");
+	  file1 = fopen( argv[1], "r");
 	  	  
   }
   else if( argc == 3) { 
-	  file1 = fopen( argv[1], "rb"); 
+	  file1 = fopen( argv[1], "r"); 
 	  file2 = fopen( argv[2], "rt");
 	  
   }
@@ -246,6 +266,24 @@ void open_files(int argc, char **argv) {
 	
 }
 
+int read_ascii() {
+	
+	int i=0;
+	if (file1 == NULL) return 0;
+	printf(" ----> Reading ascii\n");
+	while (fscanf(file1, "%f ", &spec_data[i]) != EOF ) i++;
+	fclose(file1);
+	if (i==0) {
+		printf(" ----> No spectra found\n");
+		return 0;
+	}
+	else {
+	    printf(" ----> %d channels were read \n", i);
+		return i;
+	}
+	
+}
+
 int read_gates() {
 	
 	int i=0;
@@ -263,6 +301,7 @@ int read_gates() {
 	
 }
 
+
 void fit_gauss(TH1F *hist, int gateL, int gateR) {
 
   double gConstant = 1;
@@ -276,13 +315,17 @@ void fit_gauss(TH1F *hist, int gateL, int gateR) {
   double gFWHM_error; 
   double gMean_error;
   double gConstant_error;
+  
+  hist->GetXaxis()->SetRange(gateL,gateR);
+  double iMean = hist->GetMean();
+  double iMean_error = hist->GetMeanError();  
    
   static Float_t sqrt2pi = TMath::Sqrt(2*TMath::Pi());
   
   FILE *out = fopen("results.txt", "at");
   fprintf(out, "'%s' \t %s ",files[1], &date_and_time);
       
-      
+  	    
 
   //gaus = A gaussian with 3 parameters: f(x) = p0*exp(-0.5*((x-p1)/p2)^2)
   //p1->GetParameter(0);//this is the constant
@@ -292,8 +335,8 @@ void fit_gauss(TH1F *hist, int gateL, int gateR) {
   TF1 *fitfunc = new TF1("gauss","gaus", gateL, gateR);
   
   fitfunc->SetParameters(gConstant, gMean, gSigma);
-  fitfunc->SetLineColor(3);
-  fitfunc->SetLineWidth(1);
+  fitfunc->SetLineColor(2);
+  fitfunc->SetLineWidth(2);
   
   hist->Fit(fitfunc,"+Q","same",gateL, gateR);
   
@@ -313,11 +356,25 @@ void fit_gauss(TH1F *hist, int gateL, int gateR) {
   
  
  	
-  fprintf(out, " \t %4d-%4d  Centr=%8.3f(%.3f) A=%9.1f(%.3f) FWHM=%5.1f(%.3f) Chi2/NDF=%2.1f\n",
-                 gateL, gateR, gMean, gMean_error, gArea, gArea_error, gFWHM, gFWHM_error,gChi2pNDF);
-    printf(    " \t %4d-%4d  Centr=%8.3f(%.3f) A=%9.1f(%.3f) FWHM=%5.1f(%.3f) Chi2/NDF=%2.1f\n",
-	             gateL, gateR, gMean, gMean_error, gArea, gArea_error, gFWHM, gFWHM_error,gChi2pNDF);
+  fprintf(out, " \t %4d - %4d  \t Centr= %8.3f %.3f Mean= %8.3f %.3f A= %9.1f %.3f FWHM= %5.1f %.3f Chi2/NDF= %2.1f\n",
+                 gateL, gateR, gMean, gMean_error, iMean, iMean_error, gArea, gArea_error, gFWHM, gFWHM_error,gChi2pNDF);
+    printf(    " \t %4d - %4d  \t Centr= %8.3f %.3f Mean= %8.3f %.3f A= %9.1f %.3f FWHM= %5.1f %.3f Chi2/NDF= %2.1f\n",
+	             gateL, gateR, gMean, gMean_error, iMean, iMean_error, gArea, gArea_error, gFWHM, gFWHM_error,gChi2pNDF);
 
+	
+	
+  TText *label = new TText();
+  label->SetTextFont(43);
+  label->SetTextSize(20);
+  label->SetNDC();
+  label -> SetTextColor(1);
+  float pos_x=.15, pos_y=.85, dy=.03;
+  label -> DrawText(pos_x, pos_y,  Form("Centr = %8.3f(%.3f)", gMean, gMean_error));
+  label -> DrawText(pos_x, pos_y-dy,  Form("Mean  = %8.3f(%.3f) \n", iMean, iMean_error));
+  label -> DrawText(pos_x, pos_y-2*dy,  Form("Area  = %8.1f(%.1f) \n", gArea, gArea_error));
+  label -> DrawText(pos_x, pos_y-3*dy,  Form("FWHM  = %5.1f(%.1f) \n", gFWHM, gFWHM_error));
+
+	
 	
 	fclose(out);
 
@@ -363,9 +420,9 @@ void fit_expo(TH1F *hist, int gateL, int gateR) {
   halflife       = 0.6931471806/(-eSlope);
   halflife_error = 0.6931471806/(eSlope*eSlope)*eSlope_error;
  	
-  fprintf(out, " \t %4d-%4d  T(1/2)=%8.3f(%.3f) Chi2/NDF=%2.1f\n",
+  fprintf(out, " \t %4d - %4d  T(1/2)= %8.3f %.3f Chi2/NDF= %2.1f\n",
                  gateL, gateR, halflife, halflife_error, eChi2pNDF);
-    printf(    " \t %4d-%4d  T(1/2)=%8.3f(%.3f) Chi2/NDF=%2.1f\n",
+    printf(    " \t %4d - %4d  T(1/2)= %8.3f %.3f Chi2/NDF= %2.1f\n",
                  gateL, gateR, halflife, halflife_error, eChi2pNDF);
 	
 	fclose(out);
@@ -417,9 +474,9 @@ void fit_expo_pol0(TH1F *hist, int gateL, int gateR) {
   halflife       = 0.6931471806/(-eSlope);
   halflife_error = 0.6931471806/(eSlope*eSlope)*eSlope_error;
  	
-  fprintf(out, " \t %4d-%4d  T(1/2)=%8.3f(%.3f) BG=%8.3f(%.3f) Chi2/NDF=%2.1f ",
+  fprintf(out, " \t %4d - %4d  T(1/2)= %8.3f %.3f BG=%8.3f %.3f Chi2/NDF= %2.1f ",
                  gateL, gateR, halflife, halflife_error, fitfunc->GetParameter(2), fitfunc->GetParError(2), eChi2pNDF);
-    printf(    " \t %4d-%4d  T(1/2)=%8.3f(%.3f) BG=%8.3f(%.3f) Chi2/NDF=%2.1f ",
+    printf(    " \t %4d - %4d  T(1/2)= %8.3f %.3f BG=%8.3f %.3f Chi2/NDF= %2.1f ",
                  gateL, gateR, halflife, halflife_error, fitfunc->GetParameter(2), fitfunc->GetParError(2), eChi2pNDF);
 		
   label -> SetTextColor(3);
@@ -443,14 +500,14 @@ void fit_expo_pol0(TH1F *hist, int gateL, int gateR) {
   halflife       = 0.6931471806/(-eSlope);
   halflife_error = 0.6931471806/(eSlope*eSlope)*eSlope_error;
  	
-  fprintf(out, " \t  T(1/2)(b.l.)=%8.3f(%.3f) BG=%8.3f(%.3f) Chi2/NDF=%2.1f \n",
+  fprintf(out, " \t  T(1/2)(b.l.)= %8.3f %.3f BG= %8.3f %.3f Chi2/NDF= %2.1f \n",
                  gateL, gateR, halflife, halflife_error, fitfunc->GetParameter(2), fitfunc->GetParError(2), eChi2pNDF);
-    printf(    " \t  T(1/2)(b.l.)=%8.3f(%.3f) BG=%8.3f(%.3f) Chi2/NDF=%2.1f \n",
+    printf(    " \t  T(1/2)(b.l.)= %8.3f %.3f BG= %8.3f %.3f Chi2/NDF= %2.1f \n",
                  gateL, gateR, halflife, halflife_error, fitfunc->GetParameter(2), fitfunc->GetParError(2), eChi2pNDF);
   
   
   label -> SetTextColor(2);
-  label -> DrawText(.4, .75, Form("Binned Likelyhood  T(1/2) = %8.3f(%.3f)", halflife, halflife_error));
+  label -> DrawText(.4, .75, Form("Binned Likelyhood  T(1/2) = %8.3f (%.3f)", halflife, halflife_error));
 	
 	
 	
@@ -528,7 +585,12 @@ void fit_conv(TH1F *hist, int gateL, int gateR) {
   
   //fitfunc->SetParameters(gArea, 1, gMean, gSigma);
   //fitfunc->SetParameters(607, 1, 2734, 130/2.35);
-  fitfunc->SetParameters(gConstant, 50, 2734, gSigma);
+
+  if (conv_centroid < 0) gMean = -conv_centroid;
+  if (conv_fwhm < 0) gSigma = -conv_fwhm/2.35482;
+ 
+  fitfunc->SetParameters(gConstant, 1, gMean, gSigma);
+  
   if (conv_centroid > 0) fitfunc->FixParameter(2,conv_centroid);  
   if (conv_fwhm > 0)     fitfunc->FixParameter(3,conv_fwhm/2.35482);
   
@@ -551,9 +613,9 @@ void fit_conv(TH1F *hist, int gateL, int gateR) {
   halflife       = 0.6931471806*Lifetime;
   halflife_error = 0.6931471806*Lifetime_error;
  	
-  fprintf(out, " \t %4d-%4d  T(1/2)(b.l.)=%8.3f(%.3f) Centr=%8.3f(%.3f) Sigma=%8.3f(%.3f) Chi2/NDF=%2.1f ",
+  fprintf(out, " \t %4d - %4d  T(1/2)(b.l.)= %8.3f %.3f Centr= %8.3f %.3f Sigma= %8.3f %.3f Chi2/NDF= %2.1f ",
                  gateL, gateR, halflife, halflife_error, Centroid, Centroid_error, Sigma, Sigma_error, Chi2pNDF);
-    printf(    " \t %4d-%4d  T(1/2)(b.l.)=%8.3f(%.3f) Centr=%8.3f(%.3f) Sigma=%8.3f(%.3f) Chi2/NDF=%2.1f ",
+    printf(    " \t %4d - %4d  T(1/2)(b.l.)= %8.3f %.3f Centr= %8.3f %.3f Sigma= %8.3f %.3f Chi2/NDF= %2.1f ",
                  gateL, gateR, halflife, halflife_error, Centroid, Centroid_error, Sigma, Sigma_error, Chi2pNDF);
 	
   
@@ -583,16 +645,177 @@ void fit_conv(TH1F *hist, int gateL, int gateR) {
   halflife       = 0.6931471806*Lifetime;
   halflife_error = 0.6931471806*Lifetime_error;
  	
-  fprintf(out, " \t %4d-%4d  T(1/2)=%8.3f(%.3f) Centr=%8.3f(%.3f) Sigma=%8.3f(%.3f) Chi2/NDF=%2.1f ",
+  fprintf(out, " \t %4d - %4d  T(1/2)= %8.3f %.3f Centr= %8.3f %.3f Sigma= %8.3f %.3f Chi2/NDF= %2.1f ",
                  gateL, gateR, halflife, halflife_error, Centroid, Centroid_error, Sigma, Sigma_error, Chi2pNDF);
-    printf(    " \t %4d-%4d  T(1/2)=%8.3f(%.3f) Centr=%8.3f(%.3f) Sigma=%8.3f(%.3f) Chi2/NDF=%2.1f ",
+    printf(    " \t %4d - %4d  T(1/2)= %8.3f %.3f Centr= %8.3f %.3f Sigma= %8.3f %.3f Chi2/NDF= %2.1f ",
                  gateL, gateR, halflife, halflife_error, Centroid, Centroid_error, Sigma, Sigma_error, Chi2pNDF);
+		
+  printf(    "\n Now use the fit panel and fix/modify parameters (p0 = Integral; p1 = Lifetime; p2 = Centroid; p3 = Sigma) \n");	
 		
   label -> SetTextColor(3);
   label -> DrawText(.4, .7,  Form("Chi-squared             T(1/2) = %8.3f(%.3f)", halflife, halflife_error));
 		
 		
 
+	
+	
+	
+  fclose(out);
+
+
+	}
+
+
+
+	
+//convgauss = conv + gauss
+void fit_convgauss(TH1F *hist, int gateL, int gateR) {
+
+
+  
+  double Chi2pNDF = 1.;
+  
+  double Integral = 1;
+  double Integral_error;
+  
+  double Lifetime;
+  double Lifetime_error;
+
+  double halflife;
+  double halflife_error;
+
+  double Centroid;
+  double Centroid_error;
+
+  double Sigma;
+  double Sigma_error;
+
+
+  
+  TText *label = new TText();
+  label->SetTextFont(43);
+  label->SetTextSize(20);
+  label->SetNDC();
+   
+   
+  FILE *out = fopen("results.txt", "at");
+  fprintf(out, "'%s' \t %s ",files[1], &date_and_time);
+
+ 
+  //First fit with gaussian to find initial parameters:
+  
+  double gConstant = 1;
+  double gSigma = 0.32 * (gateR - gateL);
+  double gArea = hist->Integral(gateL, gateR);  
+  double gMean = (gateR-gateL)/2 ;
+  static Float_t sqrt2pi = TMath::Sqrt(2*TMath::Pi());
+  
+  TF1 *fitfunc0 = new TF1("gauss","gaus", gateL, gateR);
+  fitfunc0->SetParameters(gConstant, gMean, gSigma);
+  fitfunc0->SetLineColorAlpha(4,0);
+  fitfunc0->SetLineWidth(0);
+  
+  hist->Fit(fitfunc0,"+Q","same",gateL, gateR);
+  
+  gConstant		    = fitfunc0->GetParameter(0);
+  gSigma      		= fitfunc0->GetParameter(2);
+  gMean       		= fitfunc0->GetParameter(1);
+  gArea		  		= gConstant * gSigma * sqrt2pi; 
+
+  
+  
+  //conv = Convolution of gaussian with exponential 4 parameters
+  //p1->GetParameter(0);//this is the integral
+  //p1->GetParameter(1);//this is the lifetime
+  //p1->GetParameter(2);//this is the centroid
+  //p1->GetParameter(3);//this is the sigma
+  
+  //convgauss = conv + gauss
+  
+    
+  TF1 *fitfunc = new TF1("convgauss","0.5*([0]/[1])*exp(-(x-[2])/[1])*exp(([3]*[3])/(2*[1]*[1]))*(1-TMath::Erf(([3]/(((2^(0.5))*[1])))-((x-[2])/(((2^(0.5))*[3])))))+gaus(4)+pol0(7)", gateL, gateR);
+  
+
+  //Free starting parameters
+  if (conv_centroid < 0) gMean = -conv_centroid;
+  if (conv_fwhm < 0) gSigma = -conv_fwhm/2.35482;
+  
+  fitfunc->SetParameters(gConstant, 1, gMean, gSigma, gConstant, gMean, gSigma, 0);
+
+  //Fix parameters
+  if (conv_centroid > 0) {
+    fitfunc->FixParameter(2,conv_centroid);
+    fitfunc->FixParameter(5,conv_centroid);
+  }
+      
+  if (conv_fwhm > 0) {
+    fitfunc->FixParameter(3,conv_fwhm/2.35482);
+    fitfunc->FixParameter(6,conv_fwhm/2.35482);
+  }
+  
+  
+  fitfunc->SetLineColor(2);
+  fitfunc->SetLineWidth(2);
+  hist->Fit(fitfunc,"+Q L","same",gateL, gateR);   //low statistics - likelihood
+  
+  Integral   		= fitfunc->GetParameter(0);
+  Integral_error    = fitfunc->GetParError(0);
+  Lifetime          = fitfunc->GetParameter(1);
+  Lifetime_error	= fitfunc->GetParError(1);
+  Centroid          = fitfunc->GetParameter(2);
+  Centroid_error	= fitfunc->GetParError(2);
+  Sigma             = fitfunc->GetParameter(3);
+  Sigma_error	    = fitfunc->GetParError(3);
+  
+  Chi2pNDF   = fitfunc->GetChisquare() / fitfunc->GetNDF();
+
+  halflife       = 0.6931471806*Lifetime;
+  halflife_error = 0.6931471806*Lifetime_error;
+ 	
+  fprintf(out, " \t %4d - %4d  T(1/2)(b.l.)= %8.3f %.3f Centr= %8.3f %.3f Sigma= %8.3f %.3f Chi2/NDF= %2.1f ",
+                 gateL, gateR, halflife, halflife_error, Centroid, Centroid_error, Sigma, Sigma_error, Chi2pNDF);
+    printf(    " \t %4d - %4d  T(1/2)(b.l.)= %8.3f %.3f Centr= %8.3f %.3f Sigma= %8.3f %.3f Chi2/NDF= %2.1f ",
+                 gateL, gateR, halflife, halflife_error, Centroid, Centroid_error, Sigma, Sigma_error, Chi2pNDF);
+	
+  
+  label -> SetTextColor(2);
+  label -> DrawText(.4, .75, Form("Binned Likelyhood  T(1/2) = %8.3f(%.3f)", halflife, halflife_error));
+	
+  
+  
+  /*
+    
+  fitfunc->SetLineColor(3);
+  fitfunc->SetLineWidth(2);
+  hist->Fit(fitfunc,"+Q","same",gateL, gateR);       //high statistics - chisq fit
+  
+  
+  Integral   		= fitfunc->GetParameter(0);
+  Integral_error    = fitfunc->GetParError(0);
+  Lifetime          = fitfunc->GetParameter(1);
+  Lifetime_error	= fitfunc->GetParError(1);
+  Centroid          = fitfunc->GetParameter(2);
+  Centroid_error	= fitfunc->GetParError(2);
+  Sigma             = fitfunc->GetParameter(3);
+  Sigma_error	    = fitfunc->GetParError(3);
+  
+  Chi2pNDF   = fitfunc->GetChisquare() / fitfunc->GetNDF();
+
+  halflife       = 0.6931471806*Lifetime;
+  halflife_error = 0.6931471806*Lifetime_error;
+ 	
+  fprintf(out, " \t %4d - %4d  T(1/2)= %8.3f %.3f Centr= %8.3f %.3f Sigma= %8.3f %.3f Chi2/NDF= %2.1f ",
+                 gateL, gateR, halflife, halflife_error, Centroid, Centroid_error, Sigma, Sigma_error, Chi2pNDF);
+    printf(    " \t %4d - %4d  T(1/2)= %8.3f %.3f Centr= %8.3f %.3f Sigma= %8.3f %.3f Chi2/NDF= %2.1f ",
+                 gateL, gateR, halflife, halflife_error, Centroid, Centroid_error, Sigma, Sigma_error, Chi2pNDF);
+		
+  printf(    "\n Now use the fit panel and fix/modify parameters (p0 = Integral; p1 = Lifetime; p2 = Centroid; p3 = Sigma) \n");	
+		
+  label -> SetTextColor(3);
+  label -> DrawText(.4, .7,  Form("Chi-squared             T(1/2) = %8.3f(%.3f)", halflife, halflife_error));
+		
+		
+*/
 	
 	
 	
@@ -606,7 +829,7 @@ void fit_conv(TH1F *hist, int gateL, int gateR) {
 void write_area(TH1F *hist) {
 	
 	FILE *out = fopen("results.txt", "at");
-	fprintf(out, "File '%s' - %s",files[1], &date_and_time);
+	fprintf(out, "File '%s' - %s\n",files[1], &date_and_time);
 	 printf(     "File '%s' - %s\n",files[1], &date_and_time);
 	float a, da,  mean, dmean;
 	     
@@ -617,8 +840,8 @@ void write_area(TH1F *hist) {
 		hist->GetXaxis()->SetRange(gateL[i],gateR[i]);
 		mean = hist->GetMean();
 		dmean = hist->GetMeanError();
-		fprintf(out, "[full]%4d - %4d \t Centr=%8.3f(%.3f) A=%9.1f(%.3f)\n", gateL[i], gateR[i], mean, dmean, a, da);
-		 printf(     "[full]%4d - %4d \t Centr=%8.3f(%.3f) A=%9.1f(%.3f)\n", gateL[i], gateR[i], mean, dmean, a, da);
+		fprintf(out, "[full] %4d - %4d \t Centr= %8.1f %.1f A= %9.1f %.1f\n", gateL[i], gateR[i], mean, dmean, a, da);
+		 printf(     "[full] %4d - %4d \t Centr= %8.1f %.1f A= %9.1f %.1f\n", gateL[i], gateR[i], mean, dmean, a, da);
     }
     fclose(out);
     
@@ -643,8 +866,8 @@ void write_area_bkg(TH1F *hist, TH1 *hist_bkg) {
         a  = a_tot - a_bkg;
         da = sqrt(a_tot + a_bkg);
 	    
-		fprintf(out, "[-bkg]%4d \t %4d \t Centr=%8.3f(%.3f) A=%9.1f(%.3f)\n", gateL[i], gateR[i], mean, dmean, a, da);
-		 printf(     "[-bkg]%4d \t %4d \t Centr=%8.3f(%.3f) A=%9.1f(%.3f)\n", gateL[i], gateR[i], mean, dmean, a, da);
+		fprintf(out, "[-bkg] %4d \t %4d \t Centr= %8.3f %.3f A= %9.1f %.3f\n", gateL[i], gateR[i], mean, dmean, a, da);
+		 printf(     "[-bkg] %4d \t %4d \t Centr= %8.3f %.3f A= %9.1f %.3f\n", gateL[i], gateR[i], mean, dmean, a, da);
 
 		
    }
@@ -673,7 +896,7 @@ int main( int argc, char **argv){
   
   printf("\n\t\t----------------------------------");
   printf("\n\t\t(simple) Spectrum analysis with ROOT");
-  printf("\n\t\t           v15.12.2016  ");
+  printf("\n\t\t           v23.07.2018  ");
   printf("\n\t\thttps://github.com/rlica/spec2root");
   printf("\n\t\t----------------------------------");
   printf("\n\n");
@@ -691,13 +914,21 @@ int main( int argc, char **argv){
   interactive();
                               
   //Reading spectrum binary file
-  data = (DATATYPE *)calloc(nchan, sizeof(DATATYPE));
-  fread(data, sizeof(DATATYPE),nchan,file1);
-  fclose(file1);
-                            
+  if (nchan > 0) {
+    bin_data = (DATATYPE *)calloc(nchan, sizeof(DATATYPE));
+    fread(bin_data, sizeof(DATATYPE),nchan,file1);
+    fclose(file1);
+    for (int i=0; i<nchan; i++) 
+      spec_data[i]=bin_data[i];    
+  }
+
+  //Reading spectrum ascii file
+  if (nchan < 0) 
+    nchan = read_ascii();  
+  	                    
   //Filling histogram
   TH1F *hist  =  new TH1F("hist" ,Form("%s", argv[1]), nchan,0,nchan);
-  for (int i = 0; i < nchan; i++) hist->SetBinContent(i+1,data[i]); //i+1 to have same values as xtrackn
+  for (int i = 0; i < nchan; i++) hist->SetBinContent(i+1,spec_data[i]); //i+1 to have same values as xtrackn
  
 
           
@@ -706,7 +937,7 @@ int main( int argc, char **argv){
 
   
   //Use TSpectrum 
-  TSpectrum *s = new TSpectrum(100);
+  TSpectrum *s = new TSpectrum();
    
             
   //Setting up the Canvas    
@@ -734,7 +965,13 @@ int main( int argc, char **argv){
 	  fit_conv(hist, gateL[0], gateR[0]);
 	  hist->GetXaxis()->SetRangeUser(2*gateL[0]-gateR[0], 2*gateR[0]-gateL[0]);
 	  }
-	  	  
+	  
+  //Conv+gauss Fit of time spectra
+  if (time_spec == 1 && convgauss_fit == 1) {
+	  fit_convgauss(hist, gateL[0], gateR[0]);
+	  hist->GetXaxis()->SetRangeUser(2*gateL[0]-gateR[0], 2*gateR[0]-gateL[0]);
+	  }
+	  	  	  
   //Automatic peaksearch
   //peaksearch(s,hist);
 
@@ -746,8 +983,13 @@ int main( int argc, char **argv){
   if (bkg_iterations != 0) {
   
     
+
+/* Ongoing work
+ 
     //Estimate background using TSpectrum::Background
-    TH1 *hist_bkg = s->Background(hist,bkg_iterations,option_string);
+    
+    TH1 *hist_bkg = s->Background(hist,nchan,bkg_iterations,kBackIncreasingWindow,kBackOrder2,kFALSE,
+                 kBackSmoothing3,kFALSE);
     if (hist_bkg) Can1->Update();
     else cout << "Cannot perform background fitting" << endl;
   
@@ -766,15 +1008,22 @@ int main( int argc, char **argv){
 		for (int i=0; i<ngates; i++)
 			fit_gauss(hist2, gateL[i], gateR[i]);
 
-    
+*/    
 	}
         
-    
+  if (pdfoutput == 1) {
+  	Can1->SaveAs("Can1.pdf");
+  }
+  
   ///// Running the ROOT Graphical Application
   if (graphical == 1) {
   	cout << "To QUIT press [Ctrl+c] or ´File-Quit Root´ [Alt+f,q]" << endl;
   	rootapp->Run();
+	Can1->SaveAs("Can1.pdf");
   }
+  
+  
+
 
     
   

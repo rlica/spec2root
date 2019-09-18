@@ -8,12 +8,12 @@ ARGC=$#
 for (( i=0; i < $ARGC; i++ ));
     do 
  
-spec2root_osx_int ${ARGV[i]} << echo
+spec2root_osx ${ARGV[i]} << echo
 4                                    
 y
 t
 e
-40 300
+700 2000
 echo
 
     done
